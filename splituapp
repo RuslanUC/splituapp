@@ -6,123 +6,111 @@
 
 # Based on the app_structure file in split_updata.pl by McSpoon
 
-from __future__ import print_function
-
 import os
-import re
-import sys
 import string
-import struct
-from subprocess import check_output
+from pathlib import Path
+from typing import BinaryIO
 
-def extract(source, flist):
-	def cmd(command):
-		try:
-			test1 = check_output(command)
-			test1 = test1.strip().decode()
-		except:
-			test1 = ''
 
-		return test1
+def read_int(file: BinaryIO) -> int:
+    return int.from_bytes(file.read(4), "little")
 
-	bytenum = 4
-	outdir = 'output'
-	img_files = []
 
-	try:
-		os.makedirs(outdir)
-	except:
-		pass
+def crc16(data: bytes) -> int:
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0x8408
+            else:
+                crc >>= 1
+    crc = ~crc & 0xFFFF
+    return ((crc & 0xFF) << 8) | (crc >> 8)
 
-	py2 = None
-	if int(''.join(str(i) for i in sys.version_info[0:2])) < 30:
-		py2 = 1
 
-	with open(source, 'rb') as f:
-		while True:
-			i = f.read(bytenum)
+def extract(source: str, flist: list[str], check_crc: bool = False):
+    bytenum = 4
+    outdir = Path("output")
+    img_files = []
 
-			if not i:
-				break
-			elif i != b'\x55\xAA\x5A\xA5':
-				continue
+    try:
+        os.makedirs(outdir)
+    except:
+        pass
 
-			headersize = f.read(bytenum)
-			headersize = list(struct.unpack('<L', headersize))[0]
-			f.seek(16, 1)
-			filesize = f.read(bytenum)
-			filesize = list(struct.unpack('<L', filesize))[0]
-			f.seek(32, 1)
-			filename = f.read(16)
+    with open(source, "rb") as f:
+        while True:
+            i = f.read(bytenum)
 
-			try:
-				filename = str(filename.decode())
-				filename = ''.join(f for f in filename if f in string.printable).lower()
-			except:
-				filename = ''
+            if not i:
+                break
+            elif i != b"\x55\xAA\x5A\xA5":
+                continue
 
-			f.seek(22, 1)
-			crcdata = f.read(headersize - 98)
+            headersize = read_int(f)
+            f.seek(16, 1)
+            filesize = read_int(f)
+            f.seek(32, 1)
+            filename = f.read(16)
 
-			if not flist or filename in flist:
-				if filename in img_files:
-					filename = filename+'_2'
+            try:
+                filename = str(filename.decode())
+                filename = ''.join(f for f in filename if f in string.printable).lower()
+            except:
+                filename = ''
 
-				print('Extracting '+filename+'.img ...')
+            f.seek(22, 1)
+            crcdata = f.read(headersize - 98)
 
-				chunk = 10240
+            if not flist or filename in flist:
+                if filename in img_files:
+                    filename = f"{filename}_2"
 
-				try:
-					with open(outdir+os.sep+filename+'.img', 'wb') as o:
-						while filesize > 0:
-							if chunk > filesize:
-								chunk = filesize
+                print(f"Extracting {filename}.img ...")
 
-							o.write(f.read(chunk))
-							filesize -= chunk
-				except:
-					print('ERROR: Failed to create '+filename+'.img\n')
-					return 1
+                chunk = 4096 if check_crc else 10240
+                checksum = b""
 
-				img_files.append(filename)
+                try:
+                    with open(outdir / f"{filename}.img", "wb") as o:
+                        while filesize > 0:
+                            if chunk > filesize:
+                                chunk = filesize
 
-				if os.name != 'nt':
-					if os.path.isfile('crc'):
-						print('Calculating crc value for '+filename+'.img ...\n')
+                            data = f.read(chunk)
+                            o.write(data)
 
-						crcval = []
-						if py2:
-							for i in crcdata:
-								crcval.append('%02X' % ord(i))
-						else:
-							for i in crcdata:
-								crcval.append('%02X' % i)
+                            if check_crc:
+                                checksum += crc16(data).to_bytes(2, "big")
+                            filesize -= chunk
+                except:
+                    print(f"ERROR: Failed to write {filename}.img\n")
+                    return
 
-						crcval = ''.join(crcval)
-						crcact = cmd('./crc output/'+filename+'.img')
+                img_files.append(filename)
 
-						if crcval != crcact:
-							print('ERROR: crc value for '+filename+'.img does not match\n')
-							return 1
-			else:
-				f.seek(filesize, 1)
+                if check_crc and crcdata != checksum:
+                    print(f"ERROR: crc value for {filename}.img does not match\n")
+            else:
+                f.seek(filesize, 1)
 
-			xbytes = bytenum - f.tell() % bytenum
-			if xbytes < bytenum:
-				f.seek(xbytes, 1)
+            xbytes = bytenum - f.tell() % bytenum
+            if xbytes < bytenum:
+                f.seek(xbytes, 1)
 
-	print('\nExtraction complete')
-	return 0
+    print("\nExtraction complete")
+
 
 if __name__ == '__main__':
-	import argparse
+    import argparse
 
-	parser = argparse.ArgumentParser(description="Split UPDATE.APP file into img files", add_help=False)
-	required = parser.add_argument_group('Required')
-	required.add_argument("-f", "--filename", required=True, help="Path to update.app file")
-	optional = parser.add_argument_group('Optional')
-	optional.add_argument("-h", "--help", action="help", help="show this help message and exit")
-	optional.add_argument("-l", "--list", nargs="*", metavar=('img1', 'img2'), help="List of img files to extract")
-	args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="Split UPDATE.APP file into img files")
+    required = parser.add_argument_group("Required")
+    required.add_argument("-f", "--filename", required=True, help="Path to update.app file")
+    optional = parser.add_argument_group("Optional")
+    optional.add_argument("-l", "--list", nargs="*", metavar=("img1", "img2"), help="List of img files to extract")
+    optional.add_argument("-c", "--check-crc", action="store_true", default=False, help="Check crc checksum. Do only if you really need to check it since current crc implementation is very slow and i dont have the time or need to rewrite it.")
+    args = parser.parse_args()
 
-	extract(args.filename, args.list)
+    extract(args.filename, args.list, args.check_crc)
